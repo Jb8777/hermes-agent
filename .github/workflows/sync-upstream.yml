@@ -1,0 +1,75 @@
+name: Sync upstream
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: "Type sync to force-update main from NousResearch/hermes-agent"
+        required: true
+        type: string
+  schedule:
+    # Weekly Monday 04:00 UTC — keeps the snapshot from rotting between manual syncs
+    - cron: "0 4 * * 1"
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: sync-upstream
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    if: github.event_name != 'workflow_dispatch' || inputs.confirm == 'sync'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout (full history)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Fetch upstream main
+        run: |
+          set -euo pipefail
+          git remote add upstream https://github.com/NousResearch/hermes-agent.git
+          git fetch --no-tags upstream main
+          echo "Local HEAD: $(git rev-parse HEAD)"
+          echo "Upstream:   $(git rev-parse upstream/main)"
+
+      - name: Force-update main to upstream/main
+        run: |
+          set -euo pipefail
+          git checkout -B main upstream/main
+          git push origin main --force
+          echo "main now at $(git rev-parse HEAD)"
+
+      - name: Close stale Dependabot PRs
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const prs = await github.paginate(github.rest.pulls.list, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              per_page: 100,
+            });
+            for (const pr of prs) {
+              const login = pr.user?.login || '';
+              const isDependabot = login === 'dependabot[bot]' || login === 'app/dependabot';
+              if (!isDependabot) continue;
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: pr.number,
+                body: 'Closing as obsolete after force-syncing `main` from `NousResearch/hermes-agent`. Dependabot will reopen fresh PRs against the new tree if needed.',
+              });
+              await github.rest.pulls.update({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                pull_number: pr.number,
+                state: 'closed',
+              });
+              core.info(`Closed #${pr.number} ${pr.title}`);
+            }
